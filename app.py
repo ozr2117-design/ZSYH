@@ -146,61 +146,32 @@ def get_macro_data():
     df['date'] = pd.to_datetime(df['date'])
     return df
 
-@st.cache_data(ttl=3600*12)
-def get_financial_bps():
-    """Dynamically calculate BPS and get report period"""
-    try:
-        # 1. Fetch latest financial report
-        df_fin = ak.stock_financial_analysis_indicator(symbol=STOCK_CODE_AK)
-        df_fin = df_fin.dropna(subset=['日期', '每股净资产_调整后(元)'])
-        df_fin['日期'] = pd.to_datetime(df_fin['日期'])
-        df_fin = df_fin.sort_values(by='日期')
-        latest_row = df_fin.iloc[-1]
+# ==========================================
+# 标的估值基准手动配置文件 (需根据关键节点手动更新)
+# ==========================================
+stock_configs = {
+    "600036.SH": {
+        "stock_name": "招商银行",
+        "anchor_bps": 43.43,         # 数据来源: 2025年度业绩快报 (截至2025-12-31的净资产)
+        "deducted_dividend": 1.013,  # 财报截止日(2025-12-31)之后，已实施除息的分红金额
+        "last_update": "2026-03-01"  # 维护时间戳，防止遗忘
+    }
+}
+
+def get_manual_bps(stock_code: str):
+    """
+    根据手动配置的静态基准获取 BPS 基本信息
+    """
+    if stock_code not in stock_configs:
+        return 39.0, "未知", 39.0, 0.0
         
-        report_date = latest_row['日期']
-        latest_bps = float(latest_row['每股净资产_调整后(元)'])
-        
-        # 2. Fetch dividend detail
-        df_div = ak.stock_fhps_detail_em(symbol=STOCK_CODE_AK)
-        div_amount = 0.0
-        if df_div is not None and not df_div.empty:
-            df_div = df_div.dropna(subset=['除权除息日'])
-            def try_parse_date(d):
-                try:
-                    return pd.to_datetime(d)
-                except:
-                    return pd.NaT
-            df_div['除权除息日_dt'] = df_div['除权除息日'].apply(try_parse_date)
-            df_div = df_div.dropna(subset=['除权除息日_dt'])
-            
-            now = pd.to_datetime(datetime.now().date())
-            mask = (df_div['除权除息日_dt'] > report_date) & (df_div['除权除息日_dt'] <= now)
-            valid_divs = df_div[mask]
-            
-            if not valid_divs.empty:
-                div_amount = (valid_divs['现金分红-现金分红比例'].astype(float) / 10).sum()
-                
-        adjusted_bps = latest_bps - div_amount
-        
-        # Format report name
-        year = report_date.year
-        month = report_date.month
-        if month == 3:
-            period_str = "一季报"
-        elif month == 6:
-            period_str = "中报"
-        elif month == 9:
-            period_str = "三季报"
-        elif month == 12:
-            period_str = "年报"
-        else:
-            period_str = "财报"
-            
-        report_name = f"{year}年{period_str}"
-        return adjusted_bps, report_name, latest_bps, div_amount
-    except Exception as e:
-        # Fallback BPS if akshare fails
-        return 39.0, "未知财报", 39.0, 0.0
+    config = stock_configs[stock_code]
+    raw_bps = config["anchor_bps"]
+    div_amount = config["deducted_dividend"]
+    real_bps = raw_bps - div_amount
+    report_name = f"手动快照 {config['last_update']}"
+    
+    return real_bps, report_name, raw_bps, div_amount
 
 
 def calculate_pyramid(price, pb):
@@ -243,15 +214,14 @@ def main():
     try:
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future_spot = executor.submit(get_spot_data)
-            future_bps = executor.submit(get_financial_bps)
             future_pb = executor.submit(get_historical_pb)
             future_macro = executor.submit(get_macro_data)
             
             price, _old_pb, _old_bps = future_spot.result()
-            adjusted_bps, report_name, raw_bps, div_amount = future_bps.result()
             df_pb = future_pb.result()
             df_macro = future_macro.result()
             
+            adjusted_bps, report_name, raw_bps, div_amount = get_manual_bps(STOCK_CODE)
             bps = adjusted_bps
             pb = price / bps if bps > 0 else 1.0
     except Exception as e:
