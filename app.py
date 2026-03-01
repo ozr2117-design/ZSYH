@@ -208,8 +208,24 @@ def calculate_pyramid(price, pb):
     return tier, buy_shares, actual_cost, rem_cash
 
 
+def render_valuation_maintenance_map():
+    with st.sidebar.expander("🗺️ 招行 2026 估值维护节点地图", expanded=False):
+        st.info("⚠️ 仅在以下关键节点触发时，需手动修改底层的 Anchor BPS 与 Deducted Dividend 参数。")
+        
+        # 核心维护节点表格
+        maintenance_table = """
+| 预计时间节点 | 触发事件 | Anchor BPS (净资产) 操作 | Deducted Dividend (已剥离现金) 操作 | 逻辑备忘 |
+| :--- | :--- | :--- | :--- | :--- |
+| **26年3月底** | 发布2025年报 | 更新为年报实际数据 | **保持 1.013 不变** | 1.013元是26年1月发的，年报截止日（25年底）这笔钱还在账上，需手动扣除。 |
+| **26年4月底** | 发布26年一季报 | 更新为一季报数据 | **修改为 0** | 一季报截止日后，1.013元已真实出表，分母实现物理对齐。 |
+| **26年6-7月** | 实施25年年度分红(除息日) | 保持一季报数据不变 | **修改为本次年度分红金额** | 股价已除息下跌，但财报未更新产生错位，必须手动累加扣除金额。 |
+        """
+        st.markdown(maintenance_table)
+
+
 def main():
-    st.title("💰 招商银行 (600036.SH) 个人家庭资产监控与加仓决策看板")
+    st.title("监控决策")
+    render_valuation_maintenance_map()
     
     try:
         with concurrent.futures.ThreadPoolExecutor() as executor:
