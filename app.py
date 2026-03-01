@@ -6,6 +6,10 @@ from plotly.subplots import make_subplots
 import math
 from datetime import datetime, timedelta
 from tenacity import retry, stop_after_attempt, wait_fixed
+import os
+import threading
+import time
+import concurrent.futures
 
 # --- Hardcoded Config ---
 STOCK_CODE = "600036.SH"
@@ -13,6 +17,10 @@ STOCK_CODE_AK = "600036" # For AKShare
 BASE_SHARES = 4600
 BASE_COST = 41.0
 AVAILABLE_CASH = 300000.0
+DATA_DIR = "data"
+
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
 
 st.set_page_config(page_title="ZSYH Pyramiding Dashboard", layout="wide")
 
@@ -62,28 +70,39 @@ def get_spot_data():
         except Exception as fallback_e:
             raise ValueError(f"Spot EM failed: {e}. Fallback Sina failed: {fallback_e}")
 
-@st.cache_data(ttl=86400)
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-def get_historical_pb():
-    """Fetch 3-year historical PB"""
-    # Using '近十年' and then filtering locally is safer
+def _fetch_and_save_historical_pb():
+    """Fetch 3-year historical PB and save to CSV"""
     df = ak.stock_zh_valuation_baidu(symbol=STOCK_CODE_AK, indicator="市净率", period="近十年")
     df['date'] = pd.to_datetime(df['date'])
     # Filter 3 years
     three_years_ago = datetime.now() - timedelta(days=3*365)
     df = df[df['date'] >= three_years_ago]
+    df.to_csv(os.path.join(DATA_DIR, "historical_pb.csv"), index=False)
+
+@st.cache_data(ttl=3600)
+def get_historical_pb():
+    """Get historical PB from local CSV. If missing, fetch synchronously. If stale, fetch in background."""
+    file_path = os.path.join(DATA_DIR, "historical_pb.csv")
+    
+    if not os.path.exists(file_path):
+        _fetch_and_save_historical_pb()
+        
+    else:
+        file_time = os.path.getmtime(file_path)
+        if (time.time() - file_time) > (12 * 3600): # 12 hours
+            threading.Thread(target=_fetch_and_save_historical_pb, daemon=True).start()
+            
+    df = pd.read_csv(file_path)
+    df['date'] = pd.to_datetime(df['date'])
     return df
 
-@st.cache_data(ttl=86400)
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-def get_macro_data():
-    """Fetch M1/M2 data for 5 years"""
+def _fetch_and_save_macro_data():
+    """Fetch M1/M2 data for 5 years and save to CSV"""
     df = ak.macro_china_money_supply()
-    # columns usually like: '月份', '货币和准货币(M2)-数量(亿元)', '货币和准货币(M2)-同比增长', '货币(M1)-数量(亿元)', '货币(M1)-同比增长'
-    
     # Extract year and month, clean robustly
     df['Month'] = df['月份'].astype(str)
-    # The string might look like '2023年12月份', let's parse
     def parse_chinese_date(ds):
         try:
             ds = ds.replace('月份', '').replace('月', '')
@@ -100,7 +119,7 @@ def get_macro_data():
     five_years_ago = datetime.now() - timedelta(days=5*365)
     df = df[df['date'] >= five_years_ago]
     
-    # Dynamic column name discovery to handle changes in akshare
+    # Dynamic column name discovery
     m2_yoy_col = [c for c in df.columns if 'M2' in c and '同比' in c][0]
     m1_yoy_col = [c for c in df.columns if 'M1' in c and '同比' in c][0]
     
@@ -108,6 +127,23 @@ def get_macro_data():
     df['M2_YoY'] = pd.to_numeric(df[m2_yoy_col], errors='coerce')
     df['Scissors'] = df['M1_YoY'] - df['M2_YoY']
     
+    df.to_csv(os.path.join(DATA_DIR, "macro_data.csv"), index=False)
+
+@st.cache_data(ttl=3600)
+def get_macro_data():
+    """Get macro data from local CSV. If missing, fetch synchronously. If stale, fetch in background."""
+    file_path = os.path.join(DATA_DIR, "macro_data.csv")
+    
+    if not os.path.exists(file_path):
+        _fetch_and_save_macro_data()
+        
+    else:
+        file_time = os.path.getmtime(file_path)
+        if (time.time() - file_time) > (12 * 3600): # 12 hours
+            threading.Thread(target=_fetch_and_save_macro_data, daemon=True).start()
+            
+    df = pd.read_csv(file_path)
+    df['date'] = pd.to_datetime(df['date'])
     return df
 
 
@@ -149,9 +185,16 @@ def main():
     st.title("💰 招商银行 (600036.SH) 个人家庭资产监控与加仓决策看板")
     
     try:
-        price, pb, bps = get_spot_data()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_spot = executor.submit(get_spot_data)
+            future_pb = executor.submit(get_historical_pb)
+            future_macro = executor.submit(get_macro_data)
+            
+            price, pb, bps = future_spot.result()
+            df_pb = future_pb.result()
+            df_macro = future_macro.result()
     except Exception as e:
-        st.error(f"Error fetching real-time data: {e}")
+        st.error(f"Error fetching data: {e}")
         return
 
     # 1. 顶部数据概览 (st.metric)
@@ -200,7 +243,6 @@ def main():
     # 3. 估值走势图 (Plotly)
     st.subheader("📈 招商银行 近3年 PB 估值走势")
     try:
-        df_pb = get_historical_pb()
         fig_pb = go.Figure()
         fig_pb.add_trace(go.Scatter(x=df_pb['date'], y=df_pb['value'], mode='lines', name='历史 PB', line=dict(color='blue')))
         
@@ -226,8 +268,6 @@ def main():
     st.markdown("---")
     st.subheader("🔭 宏观观察哨：M1 与 M2 同比增速剪刀差 (近5年)")
     try:
-        df_macro = get_macro_data()
-        
         fig_macro = make_subplots(specs=[[{"secondary_y": False}]])
         
         # M1 and M2 Lines
