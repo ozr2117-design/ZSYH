@@ -146,6 +146,62 @@ def get_macro_data():
     df['date'] = pd.to_datetime(df['date'])
     return df
 
+@st.cache_data(ttl=3600*12)
+def get_financial_bps():
+    """Dynamically calculate BPS and get report period"""
+    try:
+        # 1. Fetch latest financial report
+        df_fin = ak.stock_financial_analysis_indicator(symbol=STOCK_CODE_AK)
+        df_fin = df_fin.dropna(subset=['日期', '每股净资产_调整后(元)'])
+        df_fin['日期'] = pd.to_datetime(df_fin['日期'])
+        df_fin = df_fin.sort_values(by='日期')
+        latest_row = df_fin.iloc[-1]
+        
+        report_date = latest_row['日期']
+        latest_bps = float(latest_row['每股净资产_调整后(元)'])
+        
+        # 2. Fetch dividend detail
+        df_div = ak.stock_fhps_detail_em(symbol=STOCK_CODE_AK)
+        div_amount = 0.0
+        if df_div is not None and not df_div.empty:
+            df_div = df_div.dropna(subset=['除权除息日'])
+            def try_parse_date(d):
+                try:
+                    return pd.to_datetime(d)
+                except:
+                    return pd.NaT
+            df_div['除权除息日_dt'] = df_div['除权除息日'].apply(try_parse_date)
+            df_div = df_div.dropna(subset=['除权除息日_dt'])
+            
+            now = pd.to_datetime(datetime.now().date())
+            mask = (df_div['除权除息日_dt'] > report_date) & (df_div['除权除息日_dt'] <= now)
+            valid_divs = df_div[mask]
+            
+            if not valid_divs.empty:
+                div_amount = (valid_divs['现金分红-现金分红比例'].astype(float) / 10).sum()
+                
+        adjusted_bps = latest_bps - div_amount
+        
+        # Format report name
+        year = report_date.year
+        month = report_date.month
+        if month == 3:
+            period_str = "一季报"
+        elif month == 6:
+            period_str = "中报"
+        elif month == 9:
+            period_str = "三季报"
+        elif month == 12:
+            period_str = "年报"
+        else:
+            period_str = "财报"
+            
+        report_name = f"{year}年{period_str}"
+        return adjusted_bps, report_name, latest_bps, div_amount
+    except Exception as e:
+        # Fallback BPS if akshare fails
+        return 39.0, "未知财报", 39.0, 0.0
+
 
 def calculate_pyramid(price, pb):
     """Calculate pyramiding logic"""
@@ -187,12 +243,17 @@ def main():
     try:
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future_spot = executor.submit(get_spot_data)
+            future_bps = executor.submit(get_financial_bps)
             future_pb = executor.submit(get_historical_pb)
             future_macro = executor.submit(get_macro_data)
             
-            price, pb, bps = future_spot.result()
+            price, _old_pb, _old_bps = future_spot.result()
+            adjusted_bps, report_name, raw_bps, div_amount = future_bps.result()
             df_pb = future_pb.result()
             df_macro = future_macro.result()
+            
+            bps = adjusted_bps
+            pb = price / bps if bps > 0 else 1.0
     except Exception as e:
         st.error(f"Error fetching data: {e}")
         return
@@ -205,7 +266,7 @@ def main():
     
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("当前股价", f"¥ {price:.2f}")
-    col2.metric("最新BPS (推算)", f"¥ {bps:.2f}")
+    col2.metric(f"最新BPS ({report_name})", f"¥ {bps:.2f}")
     col3.metric("总持仓市值 (含现金)", f"¥ {mv_total:,.2f}")
     col4.metric("浮动盈亏", f"¥ {profit_loss:,.2f}", f"{profit_loss_pct:.2f}%")
     col5.metric("当前 PB (实盘)", f"{pb:.4f}")
@@ -215,8 +276,28 @@ def main():
     st.subheader("⚡ 今日操作建议")
     tier, buy_shares, actual_cost, rem_cash = calculate_pyramid(price, pb)
     
+    # Calculate next target price
+    next_pb_trigger = None
+    if pb > 0.90:
+        next_pb_trigger = 0.90
+    elif pb > 0.85:
+        next_pb_trigger = 0.85
+    elif pb > 0.75:
+        next_pb_trigger = 0.75
+    elif pb > 0.65:
+        next_pb_trigger = 0.65
+
+    if next_pb_trigger is not None:
+        target_price = next_pb_trigger * bps
+        price_diff = price - target_price
+        target_price_str = f"**📌 下一档触发目标价**：¥ {target_price:.2f}（距当前股价还差 ¥ {price_diff:.2f}）"
+    else:
+        target_price_str = "**📌 下一档触发目标价**：已到达底仓配置区间，无下一档目标价。"
+
+    bps_explanation = f"(当前 BPS: {raw_bps:.2f} - 分红除息累计: {div_amount:.2f} = {bps:.2f})" if div_amount > 0 else f"(当前 BPS: {bps:.2f})"
+
     if tier == 0:
-        st.info("🎯 **当前策略：观望期** | PB > 0.90\n\n**操作建议：【耐心持有，绝不加仓】**\n\n预计消耗资金：¥ 0.00 | 剩余可用资金：¥ {:,.2f}".format(AVAILABLE_CASH))
+        st.info(f"🎯 **当前策略：观望期** | PB > 0.90\n\n**操作建议：【耐心持有，绝不加仓】**\n\n预计消耗资金：¥ 0.00 | 剩余可用资金：¥ {AVAILABLE_CASH:,.2f}\n\n{target_price_str}  {bps_explanation}")
     else:
         # Build message
         msg_header = f"🔥 **当前处于 第 {tier} 档 加仓区间**"
@@ -229,7 +310,7 @@ def main():
         elif tier == 4:
              msg_header += " | PB: <= 0.65 (打光子弹)"
              
-        msg_body = f"**建议买入股数：{buy_shares:,} 股**\n\n预计消耗资金：¥ {actual_cost:,.2f} | 剩余可用资金：¥ {rem_cash:,.2f}"
+        msg_body = f"**建议买入股数：{buy_shares:,} 股**\n\n预计消耗资金：¥ {actual_cost:,.2f} | 剩余可用资金：¥ {rem_cash:,.2f}\n\n{target_price_str}  {bps_explanation}"
         
         if tier == 1:
             st.success(f"{msg_header}\n\n{msg_body}")
