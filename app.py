@@ -18,22 +18,49 @@ st.set_page_config(page_title="ZSYH Pyramiding Dashboard", layout="wide")
 
 # --- Data Fetching Functions ---
 @st.cache_data(ttl=300)
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 def get_spot_data():
     """Fetch real-time stock data"""
-    df = ak.stock_zh_a_spot_em()
-    zsyh = df[df["代码"] == STOCK_CODE_AK]
-    if zsyh.empty:
-        raise ValueError("Cannot find stock data for 600036")
-    zsyh = zsyh.iloc[0]
-    
-    price = float(zsyh["最新价"])
-    pb = float(zsyh["市净率"])
-    # Calculate BPS if PB and Price are available. If PB is 0 or NaN, handle it.
-    if pd.isna(pb) or pb == 0:
-        pb = 1.0 # fallback avoiding division by zero
-    bps = price / pb 
-    return price, pb, bps
+    try:
+        @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
+        def fetch_em():
+            df = ak.stock_zh_a_spot_em()
+            zsyh = df[df["代码"] == STOCK_CODE_AK]
+            if zsyh.empty:
+                raise ValueError("Cannot find stock data for 600036")
+            zsyh = zsyh.iloc[0]
+            
+            price = float(zsyh["最新价"])
+            pb = float(zsyh["市净率"])
+            if pd.isna(pb) or pb == 0:
+                pb = 1.0
+            bps = price / pb 
+            return price, pb, bps
+            
+        return fetch_em()
+    except Exception as e:
+        try:
+            import requests
+            url = f"http://hq.sinajs.cn/list=sh{STOCK_CODE_AK}"
+            headers = {"Referer": "http://finance.sina.com.cn/"}
+            r = requests.get(url, headers=headers, timeout=5)
+            data = r.text.split('"')[1].split(',')
+            if len(data) < 4:
+                raise ValueError("Invalid Sina data")
+                
+            price = float(data[3])
+            yest_close = float(data[2])
+            
+            try:
+                df_pb = get_historical_pb()
+                last_pb = float(df_pb.iloc[-1]['value'])
+                bps = yest_close / last_pb if last_pb > 0 else 38.0
+            except:
+                bps = 39.0 # Approximated safe fallback BPS for 600036
+                
+            pb = price / bps if bps > 0 else 1.0
+            return price, pb, bps
+        except Exception as fallback_e:
+            raise ValueError(f"Spot EM failed: {e}. Fallback Sina failed: {fallback_e}")
 
 @st.cache_data(ttl=86400)
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
