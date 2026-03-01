@@ -17,13 +17,10 @@ STOCK_CODE = "600036.SH"
 STOCK_CODE_AK = "600036" # For AKShare
 BASE_SHARES = 4600
 BASE_COST = 41.0
-AVAILABLE_CASH = 300000.0
 DATA_DIR = "data"
 
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
-
-st.set_page_config(page_title="ZSYH Pyramiding Dashboard", layout="wide")
 
 # --- Data Fetching Functions ---
 @st.cache_data(ttl=30)
@@ -175,38 +172,63 @@ def get_manual_bps(stock_code: str):
     return real_bps, report_name, raw_bps, div_amount
 
 
-def calculate_pyramid(price, pb):
-    """Calculate pyramiding logic"""
+def calculate_pyramid(price, pb, available_cash, t1_done, t2_done, t3_done, t4_done):
+    """Calculate pyramiding logic based on 4 tiers and completion status"""
     tier = 0
     alloc_ratio = 0.0
+    buy_shares = 0
+    actual_cost = 0.0
+    rem_cash = available_cash
+    warning_msg = None
     
+    # Base calculation amount is 300000
+    base_calc_cash = 300000.0
+
     if pb > 0.90:
         tier = 0
         alloc_ratio = 0.0
     elif pb > 0.85:
         tier = 1
-        alloc_ratio = 0.10
-    elif pb > 0.75:
+        if t1_done:
+            warning_msg = "⚠️ **【按兵不动】您已完成第一档建仓！严禁重复买入，请锁死剩余资金，等待 PB 跌破 0.85！**"
+        else:
+            alloc_ratio = 0.15 # 45,000
+    elif pb > 0.80:
         tier = 2
-        alloc_ratio = 0.20
-    elif pb > 0.65:
+        if t2_done:
+            warning_msg = "⚠️ **【按兵不动】您已完成核心区建仓！忍住波动，剩余子弹仅在 PB 跌破 0.80 时解锁！**"
+        else:
+            alloc_ratio = 0.20 # 60,000
+    elif pb > 0.70:
         tier = 3
-        alloc_ratio = 0.30
+        if t3_done:
+            warning_msg = "⚠️ **【按兵不动】您已买入历史深坑区！剩余末日子弹请锁死，仅在 PB 跌破 0.70 的极端绝境下使用！**"
+        else:
+            alloc_ratio = 0.30 # 90,000
     else:
         tier = 4
-        alloc_ratio = 1.00
+        if t4_done:
+            warning_msg = "🛡️ **【子弹打光，安心躺平】您已买在历史绝对底部，卸载软件，安心吃股息。**"
+        else:
+            # 100% of remaining cash
+            allocated_cash = available_cash
+            if price > 0:
+                buy_shares = math.floor(allocated_cash / (price * 100)) * 100
+                actual_cost = buy_shares * price
+                rem_cash = available_cash - actual_cost
+            return tier, buy_shares, actual_cost, rem_cash, warning_msg
+
+    if tier > 0 and warning_msg is None:
+        target_allocation = base_calc_cash * alloc_ratio
+        # Can't allocate more than what we actually have
+        allocated_cash = min(target_allocation, available_cash)
         
-    allocated_cash = AVAILABLE_CASH * alloc_ratio
-    # Shares must be multiple of 100
-    if price > 0:
-        buy_shares = math.floor(allocated_cash / (price * 100)) * 100
-    else:
-        buy_shares = 0
-        
-    actual_cost = buy_shares * price
-    rem_cash = AVAILABLE_CASH - actual_cost
-    
-    return tier, buy_shares, actual_cost, rem_cash
+        if price > 0:
+            buy_shares = math.floor(allocated_cash / (price * 100)) * 100
+            actual_cost = buy_shares * price
+            rem_cash = available_cash - actual_cost
+            
+    return tier, buy_shares, actual_cost, rem_cash, warning_msg
 
 
 def is_trading_time():
@@ -241,6 +263,18 @@ def render_valuation_maintenance_map():
 
 
 def main():
+    st.set_page_config(page_title="ZSYH Pyramiding Dashboard", layout="wide")
+    
+    # --- Sidebar UI ---
+    st.sidebar.title("操作面板设置")
+    available_cash_input = st.sidebar.number_input("当前剩余可用现金（元）", min_value=0.0, value=300000.0, step=1000.0)
+    
+    st.sidebar.markdown("### 建仓状态严格锁定")
+    t1_done = st.sidebar.checkbox("已完成第一档加仓 (PB <= 0.90)")
+    t2_done = st.sidebar.checkbox("已完成第二档加仓 (PB <= 0.85)")
+    t3_done = st.sidebar.checkbox("已完成第三档加仓 (PB <= 0.80)")
+    t4_done = st.sidebar.checkbox("已完成第四档加仓 (PB <= 0.70)")
+    
     st.title("监控决策")
     
     if is_trading_time():
@@ -270,7 +304,7 @@ def main():
 
     # 1. 顶部数据概览 (st.metric)
     mv_base = BASE_SHARES * price
-    mv_total = mv_base + AVAILABLE_CASH
+    mv_total = mv_base + available_cash_input
     profit_loss = (price - BASE_COST) * BASE_SHARES
     profit_loss_pct = (price / BASE_COST - 1) * 100 if BASE_COST > 0 else 0
     
@@ -284,18 +318,20 @@ def main():
     # 2. 决策指令区 (st.success / st.warning / st.error)
     st.markdown("---")
     st.subheader("⚡ 今日操作建议")
-    tier, buy_shares, actual_cost, rem_cash = calculate_pyramid(price, pb)
+    tier, buy_shares, actual_cost, rem_cash, warning_msg = calculate_pyramid(
+        price, pb, available_cash_input, t1_done, t2_done, t3_done, t4_done
+    )
     
-    # Calculate next target price
+    # Calculate next target price based on strictly new tiers
     next_pb_trigger = None
     if pb > 0.90:
         next_pb_trigger = 0.90
     elif pb > 0.85:
         next_pb_trigger = 0.85
-    elif pb > 0.75:
-        next_pb_trigger = 0.75
-    elif pb > 0.65:
-        next_pb_trigger = 0.65
+    elif pb > 0.80:
+        next_pb_trigger = 0.80
+    elif pb > 0.70:
+        next_pb_trigger = 0.70
 
     if next_pb_trigger is not None:
         target_price = next_pb_trigger * bps
@@ -307,27 +343,30 @@ def main():
     bps_explanation = f"(当前 BPS: {raw_bps:.2f} - 分红除息累计: {div_amount:.2f} = {bps:.2f})" if div_amount > 0 else f"(当前 BPS: {bps:.2f})"
 
     if tier == 0:
-        st.info(f"🎯 **当前策略：观望期** | PB > 0.90\n\n**操作建议：【耐心持有，绝不加仓】**\n\n预计消耗资金：¥ 0.00 | 剩余可用资金：¥ {AVAILABLE_CASH:,.2f}\n\n{target_price_str}  {bps_explanation}")
+        st.info(f"🎯 **当前策略：观望期** | PB > 0.90\n\n**操作建议：【耐心持有，绝不加仓】**\n\n预计消耗资金：¥ 0.00 | 剩余可用资金：¥ {available_cash_input:,.2f}\n\n{target_price_str}  {bps_explanation}")
     else:
         # Build message
         msg_header = f"🔥 **当前处于 第 {tier} 档 加仓区间**"
         if tier == 1:
              msg_header += " | PB: (0.85, 0.90]"
         elif tier == 2:
-             msg_header += " | PB: (0.75, 0.85]"
+             msg_header += " | PB: (0.80, 0.85]"
         elif tier == 3:
-             msg_header += " | PB: (0.65, 0.75]"
+             msg_header += " | PB: (0.70, 0.80]"
         elif tier == 4:
-             msg_header += " | PB: <= 0.65 (打光子弹)"
+             msg_header += " | PB: <= 0.70 (打光子弹)"
              
-        msg_body = f"**建议买入股数：{buy_shares:,} 股**\n\n预计消耗资金：¥ {actual_cost:,.2f} | 剩余可用资金：¥ {rem_cash:,.2f}\n\n{target_price_str}  {bps_explanation}"
-        
-        if tier == 1:
-            st.success(f"{msg_header}\n\n{msg_body}")
-        elif tier == 2:
-            st.warning(f"{msg_header}\n\n{msg_body}")
+        if warning_msg:
+             st.error(f"{msg_header}\n\n{warning_msg}\n\n{target_price_str}  {bps_explanation}")
         else:
-            st.error(f"{msg_header}\n\n{msg_body}")
+             msg_body = f"**建议买入股数：{buy_shares:,} 股**\n\n预计消耗资金：¥ {actual_cost:,.2f} | 剩余可用资金：¥ {rem_cash:,.2f}\n\n{target_price_str}  {bps_explanation}"
+             
+             if tier == 1:
+                 st.success(f"{msg_header}\n\n{msg_body}")
+             elif tier == 2:
+                 st.warning(f"{msg_header}\n\n{msg_body}")
+             else:
+                 st.error(f"{msg_header}\n\n{msg_body}")
 
     st.markdown("---")
     
@@ -341,8 +380,8 @@ def main():
         hline_config = [
             (0.90, '观望/一档边界 (0.90)', 'gray'),
             (0.85, '一档/二档边界 (0.85)', 'green'),
-            (0.75, '二档/三档边界 (0.75)', 'orange'),
-            (0.65, '三档/四档边界 (0.65)', 'red')
+            (0.80, '二档/三档边界 (0.80)', 'orange'),
+            (0.70, '三档/四档边界 (0.70)', 'red')
         ]
         for val, name, color in hline_config:
             fig_pb.add_hline(y=val, line_dash="dash", line_color=color, annotation_text=name, annotation_position="top right")
