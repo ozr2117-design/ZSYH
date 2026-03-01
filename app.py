@@ -10,6 +10,7 @@ import os
 import threading
 import time
 import concurrent.futures
+from streamlit_autorefresh import st_autorefresh
 
 # --- Hardcoded Config ---
 STOCK_CODE = "600036.SH"
@@ -25,7 +26,7 @@ if not os.path.exists(DATA_DIR):
 st.set_page_config(page_title="ZSYH Pyramiding Dashboard", layout="wide")
 
 # --- Data Fetching Functions ---
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=30)
 def get_spot_data():
     """Fetch real-time stock data"""
     try:
@@ -208,6 +209,22 @@ def calculate_pyramid(price, pb):
     return tier, buy_shares, actual_cost, rem_cash
 
 
+def is_trading_time():
+    """Check if current time is within A-share trading hours (09:15-11:30, 13:00-15:05) on a weekday"""
+    now = datetime.now()
+    if now.weekday() >= 5: # Saturday or Sunday
+        return False
+        
+    current_time = now.time()
+    morning_start = datetime.strptime("09:15", "%H:%M").time()
+    morning_end = datetime.strptime("11:30", "%H:%M").time()
+    afternoon_start = datetime.strptime("13:00", "%H:%M").time()
+    afternoon_end = datetime.strptime("15:05", "%H:%M").time()
+    
+    if (morning_start <= current_time <= morning_end) or (afternoon_start <= current_time <= afternoon_end):
+        return True
+    return False
+
 def render_valuation_maintenance_map():
     with st.sidebar.expander("🗺️ 招行 2026 估值维护节点地图", expanded=False):
         st.info("⚠️ 仅在以下关键节点触发时，需手动修改底层的 Anchor BPS 与 Deducted Dividend 参数。")
@@ -225,6 +242,13 @@ def render_valuation_maintenance_map():
 
 def main():
     st.title("监控决策")
+    
+    if is_trading_time():
+        st_autorefresh(interval=30000, key="data_refresh")
+        st.caption("🔄 实盘数据已开启 30 秒自动刷新 (交易时段)")
+    else:
+        st.caption("⏸️ 非交易时段，自动刷新已暂停")
+        
     render_valuation_maintenance_map()
     
     try:
