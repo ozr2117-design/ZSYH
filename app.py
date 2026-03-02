@@ -4,7 +4,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from tenacity import retry, stop_after_attempt, wait_fixed
 import os
 import threading
@@ -233,7 +233,8 @@ def calculate_pyramid(price, pb, available_cash, t1_done, t2_done, t3_done, t4_d
 
 def is_trading_time():
     """Check if current time is within A-share trading hours (09:15-11:30, 13:00-15:05) on a weekday"""
-    now = datetime.now()
+    tz_bj = timezone(timedelta(hours=8))
+    now = datetime.now(tz_bj)
     if now.weekday() >= 5: # Saturday or Sunday
         return False
         
