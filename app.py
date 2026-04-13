@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import math
+import requests
 from datetime import datetime, timedelta, timezone
 from tenacity import retry, stop_after_attempt, wait_fixed
 import os
@@ -25,48 +26,18 @@ if not os.path.exists(DATA_DIR):
 # --- Data Fetching Functions ---
 @st.cache_data(ttl=30)
 def get_spot_data():
-    """Fetch real-time stock data"""
-    try:
-        @retry(stop=stop_after_attempt(2), wait=wait_fixed(0.5), reraise=True)
-        def fetch_em():
-            df = ak.stock_zh_a_spot_em()
-            zsyh = df[df["代码"] == STOCK_CODE_AK]
-            if zsyh.empty:
-                raise ValueError("Cannot find stock data for 600036")
-            zsyh = zsyh.iloc[0]
-            
-            price = float(zsyh["最新价"])
-            pb = float(zsyh["市净率"])
-            if pd.isna(pb) or pb == 0:
-                pb = 1.0
-            bps = price / pb 
-            return price, pb, bps
-            
-        return fetch_em()
-    except Exception as e:
-        try:
-            import requests
-            url = f"http://hq.sinajs.cn/list=sh{STOCK_CODE_AK}"
-            headers = {"Referer": "http://finance.sina.com.cn/"}
-            r = requests.get(url, headers=headers, timeout=5)
-            data = r.text.split('"')[1].split(',')
-            if len(data) < 4:
-                raise ValueError("Invalid Sina data")
-                
-            price = float(data[3])
-            yest_close = float(data[2])
-            
-            try:
-                df_pb = get_historical_pb()
-                last_pb = float(df_pb.iloc[-1]['value'])
-                bps = yest_close / last_pb if last_pb > 0 else 38.0
-            except:
-                bps = 39.0 # Approximated safe fallback BPS for 600036
-                
-            pb = price / bps if bps > 0 else 1.0
-            return price, pb, bps
-        except Exception as fallback_e:
-            raise ValueError(f"Spot EM failed: {e}. Fallback Sina failed: {fallback_e}")
+    """Fetch real-time stock price via Sina Finance (fast, cloud-friendly)"""
+    url = f"http://hq.sinajs.cn/list=sh{STOCK_CODE_AK}"
+    headers = {"Referer": "http://finance.sina.com.cn/"}
+    r = requests.get(url, headers=headers, timeout=8)
+    data = r.text.split('"')[1].split(',')
+    if len(data) < 4:
+        raise ValueError(f"Invalid Sina response: {r.text[:100]}")
+    price = float(data[3])
+    if price <= 0:
+        raise ValueError(f"Invalid price from Sina: {price}")
+    return price
+
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 def _fetch_and_save_historical_pb():
@@ -286,22 +257,29 @@ def main():
         
     render_valuation_maintenance_map()
     
-    try:
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future_spot = executor.submit(get_spot_data)
-            future_pb = executor.submit(get_historical_pb)
-            future_macro = executor.submit(get_macro_data)
-            
-            price, _old_pb, _old_bps = future_spot.result()
-            df_pb = future_pb.result()
-            df_macro = future_macro.result()
-            
+    with st.status("📡 正在加载数据...", expanded=True) as status:
+        try:
+            st.write("🔗 获取实时股价 (新浪财经)...")
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future_spot = executor.submit(get_spot_data)
+                future_pb = executor.submit(get_historical_pb)
+                future_macro = executor.submit(get_macro_data)
+
+                st.write("📊 获取历史 PB 数据 (百度财经)...")
+                price = future_spot.result(timeout=15)
+
+                st.write("🔭 获取宏观 M1/M2 数据...")
+                df_pb = future_pb.result(timeout=30)
+                df_macro = future_macro.result(timeout=30)
+
             adjusted_bps, report_name, raw_bps, div_amount = get_manual_bps(STOCK_CODE)
             bps = adjusted_bps
             pb = price / bps if bps > 0 else 1.0
-    except Exception as e:
-        st.error(f"Error fetching data: {e}")
-        return
+            status.update(label="✅ 数据加载完成", state="complete", expanded=False)
+        except Exception as e:
+            status.update(label="❌ 数据加载失败", state="error", expanded=True)
+            st.error(f"数据获取失败: {e}")
+            st.stop()
 
     # 1. 顶部数据概览 (st.metric)
     mv_base = BASE_SHARES * price
