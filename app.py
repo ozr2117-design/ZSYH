@@ -27,7 +27,7 @@ if not os.path.exists(DATA_DIR):
 def get_spot_data():
     """Fetch real-time stock data"""
     try:
-        @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
+        @retry(stop=stop_after_attempt(2), wait=wait_fixed(0.5), reraise=True)
         def fetch_em():
             df = ak.stock_zh_a_spot_em()
             zsyh = df[df["代码"] == STOCK_CODE_AK]

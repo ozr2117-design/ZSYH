@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Local data cache (auto-generated at runtime, do not commit)
+data/
+
+# Test scripts
+test_*.py
+
+# IDE
+.vscode/
+.idea/
