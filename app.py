@@ -43,7 +43,8 @@ def get_spot_data():
 def _fetch_technical_data():
     start_date = (datetime.now() - timedelta(days=200)).strftime("%Y%m%d")
     end_date = datetime.now().strftime("%Y%m%d")
-    df = ak.stock_zh_a_hist(symbol=STOCK_CODE_AK, period="daily", start_date=start_date, end_date=end_date, adjust="")
+    # Switch to Tencent Finance as requested to fix EastMoney connection issues
+    df = ak.stock_zh_a_hist_tx(symbol=f"sh{STOCK_CODE_AK}", start_date=start_date, end_date=end_date, adjust="")
     if df.empty:
         raise ValueError("Empty dataframe from akshare")
     return df
@@ -51,9 +52,9 @@ def _fetch_technical_data():
 @st.cache_data(ttl=3600)
 def get_technical_indicators():
     df = _fetch_technical_data()
-    df['收盘'] = pd.to_numeric(df['收盘'])
-    df['RSI_14'] = ta.rsi(df['收盘'], length=14)
-    bbands = ta.bbands(df['收盘'], length=20, std=2)
+    df['close'] = pd.to_numeric(df['close'])
+    df['RSI_14'] = ta.rsi(df['close'], length=14)
+    bbands = ta.bbands(df['close'], length=20, std=2)
     df = pd.concat([df, bbands], axis=1)
     
     latest = df.iloc[-1]
