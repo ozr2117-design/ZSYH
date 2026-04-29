@@ -12,6 +12,7 @@ import threading
 import time
 import concurrent.futures
 from streamlit_autorefresh import st_autorefresh
+import pandas_ta as ta
 
 # --- Hardcoded Config ---
 STOCK_CODE = "600036.SH"
@@ -37,6 +38,26 @@ def get_spot_data():
     if price <= 0:
         raise ValueError(f"Invalid price from Sina: {price}")
     return price
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+def _fetch_technical_data():
+    start_date = (datetime.now() - timedelta(days=200)).strftime("%Y%m%d")
+    end_date = datetime.now().strftime("%Y%m%d")
+    df = ak.stock_zh_a_hist(symbol=STOCK_CODE_AK, period="daily", start_date=start_date, end_date=end_date, adjust="")
+    if df.empty:
+        raise ValueError("Empty dataframe from akshare")
+    return df
+
+@st.cache_data(ttl=3600)
+def get_technical_indicators():
+    df = _fetch_technical_data()
+    df['收盘'] = pd.to_numeric(df['收盘'])
+    df['RSI_14'] = ta.rsi(df['收盘'], length=14)
+    bbands = ta.bbands(df['收盘'], length=20, std=2)
+    df = pd.concat([df, bbands], axis=1)
+    
+    latest = df.iloc[-1]
+    return float(latest['RSI_14']), float(latest['BBL_20_2.0'])
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
@@ -143,14 +164,16 @@ def get_manual_bps(stock_code: str):
     return real_bps, report_name, raw_bps, div_amount
 
 
-def calculate_pyramid(price, pb, available_cash, t1_done, t2_done, t3_done, t4_done):
-    """Calculate pyramiding logic based on 4 tiers and completion status"""
+def calculate_pyramid(price, pb, available_cash, t1_done, t2_done, t3_done, t4_done, rsi, bbl):
+    """Calculate pyramiding logic based on 4 tiers, completion status, and technical indicators"""
     tier = 0
     alloc_ratio = 0.0
     buy_shares = 0
     actual_cost = 0.0
     rem_cash = available_cash
     warning_msg = None
+    
+    trigger = (rsi < 30) or (price <= bbl)
     
     # Base calculation amount is 300000
     base_calc_cash = 300000.0
@@ -187,7 +210,7 @@ def calculate_pyramid(price, pb, available_cash, t1_done, t2_done, t3_done, t4_d
                 buy_shares = math.floor(allocated_cash / (price * 100)) * 100
                 actual_cost = buy_shares * price
                 rem_cash = available_cash - actual_cost
-            return tier, buy_shares, actual_cost, rem_cash, warning_msg
+            return tier, buy_shares, actual_cost, rem_cash, warning_msg, trigger
 
     if tier > 0 and warning_msg is None:
         target_allocation = base_calc_cash * alloc_ratio
@@ -199,7 +222,7 @@ def calculate_pyramid(price, pb, available_cash, t1_done, t2_done, t3_done, t4_d
             actual_cost = buy_shares * price
             rem_cash = available_cash - actual_cost
             
-    return tier, buy_shares, actual_cost, rem_cash, warning_msg
+    return tier, buy_shares, actual_cost, rem_cash, warning_msg, trigger
 
 
 def is_trading_time():
@@ -242,10 +265,10 @@ def main():
     available_cash_input = st.sidebar.number_input("当前剩余可用现金（元）", min_value=0.0, value=300000.0, step=1000.0)
     
     st.sidebar.markdown("### 建仓状态严格锁定")
-    t1_done = st.sidebar.checkbox("已完成第一档加仓 (PB <= 0.90)")
-    t2_done = st.sidebar.checkbox("已完成第二档加仓 (PB <= 0.85)")
-    t3_done = st.sidebar.checkbox("已完成第三档加仓 (PB <= 0.80)")
-    t4_done = st.sidebar.checkbox("已完成第四档加仓 (PB <= 0.70)")
+    t1_done = st.sidebar.checkbox("已完成第一档加仓 (PB <= 0.90)", key="t1_done_cb")
+    t2_done = st.sidebar.checkbox("已完成第二档加仓 (PB <= 0.85)", key="t2_done_cb")
+    t3_done = st.sidebar.checkbox("已完成第三档加仓 (PB <= 0.80)", key="t3_done_cb")
+    t4_done = st.sidebar.checkbox("已完成第四档加仓 (PB <= 0.70)", key="t4_done_cb")
     
     st.title("监控决策")
     
@@ -264,6 +287,7 @@ def main():
                 future_spot = executor.submit(get_spot_data)
                 future_pb = executor.submit(get_historical_pb)
                 future_macro = executor.submit(get_macro_data)
+                future_tech = executor.submit(get_technical_indicators)
 
                 st.write("📊 获取历史 PB 数据 (百度财经)...")
                 price = future_spot.result(timeout=15)
@@ -271,6 +295,9 @@ def main():
                 st.write("🔭 获取宏观 M1/M2 数据...")
                 df_pb = future_pb.result(timeout=30)
                 df_macro = future_macro.result(timeout=30)
+                
+                st.write("📈 获取技术超卖指标 (RSI/布林带)...")
+                rsi, bbl = future_tech.result(timeout=30)
 
             adjusted_bps, report_name, raw_bps, div_amount = get_manual_bps(STOCK_CODE)
             bps = adjusted_bps
@@ -293,12 +320,23 @@ def main():
     col3.metric("总市值 (含现金)", f"¥ {mv_total:,.0f}")
     col4.metric("浮动盈亏", f"¥ {profit_loss:,.0f}", f"{profit_loss_pct:.2f}%")
     col5.metric("当前 PB", f"{pb:.4f}")
+    
+    # 2. 技术指标概览
+    st.markdown("---")
+    tcol1, tcol2, tcol3 = st.columns([1, 1, 2])
+    
+    rsi_color = "🟢" if rsi < 30 else "🔴"
+    bbl_color = "🟢" if price <= bbl else "🔴"
+    
+    tcol1.metric(f"{rsi_color} 当前 RSI(14)", f"{rsi:.2f}", "超卖区: <30", delta_color="off" if rsi >= 30 else "normal")
+    tcol2.metric(f"{bbl_color} 布林带下轨", f"¥ {bbl:.2f}", "跌破触发" if price <= bbl else "未跌破下轨", delta_color="off" if price > bbl else "normal")
+    tcol3.info("💡 战术进攻扳机：RSI < 30 或 当日收盘价跌破布林带下轨。只有当 PB 估值达标且战术扳机触发时，才构成强烈加仓共振。")
 
-    # 2. 决策指令区 (st.success / st.warning / st.error)
+    # 3. 决策指令区 (st.success / st.warning / st.error)
     st.markdown("---")
     st.subheader("⚡ 今日操作建议")
-    tier, buy_shares, actual_cost, rem_cash, warning_msg = calculate_pyramid(
-        price, pb, available_cash_input, t1_done, t2_done, t3_done, t4_done
+    tier, buy_shares, actual_cost, rem_cash, warning_msg, trigger = calculate_pyramid(
+        price, pb, available_cash_input, t1_done, t2_done, t3_done, t4_done, rsi, bbl
     )
     
     # Calculate next target price based on strictly new tiers
@@ -322,7 +360,7 @@ def main():
     bps_explanation = f"(当前 BPS: {raw_bps:.2f} - 分红除息累计: {div_amount:.2f} = {bps:.2f})" if div_amount > 0 else f"(当前 BPS: {bps:.2f})"
 
     if tier == 0:
-        st.info(f"🎯 **当前策略：观望期** | PB > 0.90\n\n**操作建议：【耐心持有，绝不加仓】**\n\n预计消耗资金：¥ 0.00 | 剩余可用资金：¥ {available_cash_input:,.2f}\n\n{target_price_str}  {bps_explanation}")
+        st.info(f"☕ **估值偏高，持仓收息不动**\n\n🎯 **当前策略：观望期** | PB > 0.90\n\n预计消耗资金：¥ 0.00 | 剩余可用资金：¥ {available_cash_input:,.2f}\n\n{target_price_str}  {bps_explanation}")
     else:
         # Build message
         msg_header = f"🔥 **当前处于 第 {tier} 档 加仓区间**"
@@ -338,18 +376,14 @@ def main():
         if warning_msg:
              st.error(f"{msg_header}\n\n{warning_msg}\n\n{target_price_str}  {bps_explanation}")
         else:
-             msg_body = f"**建议买入股数：{buy_shares:,} 股**\n\n预计消耗资金：¥ {actual_cost:,.2f} | 剩余可用资金：¥ {rem_cash:,.2f}\n\n{target_price_str}  {bps_explanation}"
-             
-             if tier == 1:
-                 st.success(f"{msg_header}\n\n{msg_body}")
-             elif tier == 2:
-                 st.warning(f"{msg_header}\n\n{msg_body}")
+             if trigger:
+                 st.success(f"🔥 强烈建议加仓：处于第 {tier} 档极寒区间且出现技术超卖共振\n\n{msg_header}\n\n**建议买入股数：{buy_shares:,} 股**\n\n预计消耗资金：¥ {actual_cost:,.2f} | 剩余可用资金：¥ {rem_cash:,.2f}\n\n{target_price_str}  {bps_explanation}")
              else:
-                 st.error(f"{msg_header}\n\n{msg_body}")
+                 st.warning(f"⏸️ 估值达标 (第 {tier} 档)，但未见超卖信号，建议持币观望等待技术底\n\n{msg_header}\n\n(原建议买入：{buy_shares:,} 股，当前因未触发超卖建议暂缓)\n\n预计消耗资金：¥ 0.00 | 剩余可用资金：¥ {available_cash_input:,.2f}\n\n{target_price_str}  {bps_explanation}")
 
     st.markdown("---")
     
-    # 3. 估值走势图 (Plotly)
+    # 4. 估值走势图 (Plotly)
     st.subheader("📈 招商银行 近3年 PB 估值走势")
     try:
         fig_pb = go.Figure()
@@ -373,7 +407,7 @@ def main():
     except Exception as e:
         st.error(f"Error loading historical PB data: {e}")
 
-    # 4. 宏观观察哨 (Plotly)
+    # 5. 宏观观察哨 (Plotly)
     st.markdown("---")
     st.subheader("🔭 宏观观察哨：M1 与 M2 同比增速剪刀差 (近5年)")
     try:
