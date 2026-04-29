@@ -287,12 +287,12 @@ def main():
     profit_loss = (price - BASE_COST) * BASE_SHARES
     profit_loss_pct = (price / BASE_COST - 1) * 100 if BASE_COST > 0 else 0
     
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4, col5 = st.columns([1, 1, 1.2, 1.2, 1])
     col1.metric("当前股价", f"¥ {price:.2f}")
-    col2.metric(f"最新BPS ({report_name})", f"¥ {bps:.2f}")
-    col3.metric("总持仓市值 (含现金)", f"¥ {mv_total:,.2f}")
-    col4.metric("浮动盈亏", f"¥ {profit_loss:,.2f}", f"{profit_loss_pct:.2f}%")
-    col5.metric("当前 PB (实盘)", f"{pb:.4f}")
+    col2.metric("最新BPS", f"¥ {bps:.2f}", help=f"数据来源: {report_name}")
+    col3.metric("总市值 (含现金)", f"¥ {mv_total:,.0f}")
+    col4.metric("浮动盈亏", f"¥ {profit_loss:,.0f}", f"{profit_loss_pct:.2f}%")
+    col5.metric("当前 PB", f"{pb:.4f}")
 
     # 2. 决策指令区 (st.success / st.warning / st.error)
     st.markdown("---")
