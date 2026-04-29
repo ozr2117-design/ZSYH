@@ -57,8 +57,11 @@ def get_technical_indicators():
     bbands = ta.bbands(df['close'], length=20, std=2)
     df = pd.concat([df, bbands], axis=1)
     
+    # Dynamically find the BBL column name to handle pandas_ta version differences
+    bbl_col = [c for c in df.columns if c.startswith('BBL')][0]
+    
     latest = df.iloc[-1]
-    return float(latest['RSI_14']), float(latest['BBL_20_2.0'])
+    return float(latest['RSI_14']), float(latest[bbl_col])
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
